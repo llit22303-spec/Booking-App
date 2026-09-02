@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import JSONResponse
 from passlib.context import CryptContext
 from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
@@ -20,7 +21,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger(__name__)
+
+logger = logging.getLogger(__name__)  # FIX: __name__ (double underscores)
 
 # ==========================================
 # ENVIRONMENT VARIABLES
@@ -58,7 +60,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -140,13 +142,14 @@ def get_customers():
         customers = cursor.fetchall()
         return customers
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching customers: {e}")
         raise HTTPException(
             status_code=500,
             detail="Error fetching customers"
         )
-
     finally:
         if cursor:
             cursor.close()
@@ -174,13 +177,14 @@ def get_user_by_email(email: str):
         user = cursor.fetchone()
         return user
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching user: {e}")
         raise HTTPException(
             status_code=500,
             detail="Error fetching user"
         )
-
     finally:
         if cursor:
             cursor.close()
@@ -201,6 +205,13 @@ def create_user(user: UserRegisterModel):
                 detail="Database connection error"
             )
 
+        # bcrypt maximum password size = 72 bytes
+        if len(user.password.encode("utf-8")) > 72:
+            raise HTTPException(
+                status_code=400,
+                detail="Password cannot be longer than 72 bytes"
+            )
+
         hashed_password = hash_password(user.password)
 
         cursor.execute(
@@ -209,19 +220,17 @@ def create_user(user: UserRegisterModel):
             VALUES (%s, %s, %s)
             RETURNING id
             """,
-            (
-                user.email,
-                hashed_password,
-                user.name
-            )
+            (user.email, hashed_password, user.name)
         )
 
-        user_id = cursor.fetchone()['id']
+        user_id = cursor.fetchone()["id"]
         conn.commit()
-        
+
         logger.info(f"User created successfully with ID: {user_id}")
         return user_id
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating user: {e}")
         if conn:
@@ -230,7 +239,6 @@ def create_user(user: UserRegisterModel):
             status_code=500,
             detail="Error creating user"
         )
-
     finally:
         if cursor:
             cursor.close()
@@ -243,11 +251,9 @@ def create_user(user: UserRegisterModel):
 
 def authenticate_user(email: str, password: str):
     user = get_user_by_email(email)
-    
     if user:
         if verify_password(password, user["_password"]):
             return user
-    
     return None
 
 # ==========================================
@@ -284,6 +290,8 @@ def get_current_user(
 
         return user
 
+    except HTTPException:
+        raise
     except JWTError as e:
         logger.error(f"JWT Error: {e}")
         raise HTTPException(
@@ -297,22 +305,25 @@ def get_current_user(
 
 @app.get("/health", response_model=MessageResponseModel)
 async def health_check():
-    """
-    Health check endpoint to verify service status
-    """
     try:
-        # Test database connection
         conn, cursor = db.get_connection()
         if conn and cursor:
             cursor.execute("SELECT 1")
             cursor.close()
             conn.close()
             return {"message": "Service is healthy"}
-        else:
-            raise HTTPException(status_code=503, detail="Database connection failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Database connection failed"
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=503, detail="Service is unhealthy")
+        raise HTTPException(
+            status_code=503,
+            detail="Service is unhealthy"
+        )
 
 # ==========================================
 # ROOT ENDPOINT
@@ -320,9 +331,6 @@ async def health_check():
 
 @app.get("/")
 async def root():
-    """
-    Root endpoint with API information
-    """
     return {
         "message": "Welcome to FastAPI with Neon PostgreSQL",
         "docs": "/docs",
@@ -336,9 +344,6 @@ async def root():
 
 @app.get("/customers")
 async def read_customers():
-    """
-    Get all customers (Public endpoint)
-    """
     customers = get_customers()
     return {
         "customers": customers,
@@ -351,13 +356,7 @@ async def read_customers():
 
 @app.post("/login", response_model=TokenResponseModel)
 def login(login_data: UserLoginModel):
-    """
-    Authenticate user and return access token
-    """
-    user = authenticate_user(
-        login_data.email,
-        login_data.password
-    )
+    user = authenticate_user(login_data.email, login_data.password)
 
     if user is None:
         logger.warning(f"Failed login attempt for email: {login_data.email}")
@@ -366,9 +365,7 @@ def login(login_data: UserLoginModel):
             detail="Invalid email or password"
         )
 
-    access_token = create_access_token({
-        "sub": user["email"]
-    })
+    access_token = create_access_token({"sub": user["email"]})
 
     logger.info(f"User logged in successfully: {user['email']}")
 
@@ -388,9 +385,20 @@ def login(login_data: UserLoginModel):
 
 @app.post("/register", response_model=MessageResponseModel)
 def register(user: UserRegisterModel):
-    """
-    Register a new user
-    """
+    # Validate input
+    if not user.email or not user.password or not user.name:
+        raise HTTPException(
+            status_code=400,
+            detail="Email, password, and name are required"
+        )
+
+    # bcrypt supports maximum 72 bytes
+    if len(user.password.encode("utf-8")) > 72:
+        raise HTTPException(
+            status_code=400,
+            detail="Password cannot be longer than 72 bytes"
+        )
+
     # Check if user already exists
     existing_user = get_user_by_email(user.email)
 
@@ -401,33 +409,19 @@ def register(user: UserRegisterModel):
             detail="Email already registered"
         )
 
-    # Validate input
-    if not user.email or not user.password or not user.name:
-        raise HTTPException(
-            status_code=400,
-            detail="Email, password, and name are required"
-        )
-
     # Create user
     create_user(user)
 
     logger.info(f"User registered successfully: {user.email}")
 
-    return {
-        "message": "User registered successfully"
-    }
+    return {"message": "User registered successfully"}
 
 # ==========================================
 # PROTECTED PROFILE ROUTE
 # ==========================================
 
 @app.get("/profile", response_model=UserResponseModel)
-def profile(
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Get current user profile (Protected endpoint)
-    """
+def profile(current_user: dict = Depends(get_current_user)):
     return {
         "id": current_user["id"],
         "email": current_user["email"],
@@ -435,16 +429,11 @@ def profile(
     }
 
 # ==========================================
-# PROTECTED ADMIN ROUTE (Example)
+# PROTECTED ROUTE
 # ==========================================
 
 @app.get("/protected")
-def protected_route(
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Example protected route (Protected endpoint)
-    """
+def protected_route(current_user: dict = Depends(get_current_user)):
     return {
         "message": "You have accessed a protected route",
         "user": {
@@ -456,20 +445,20 @@ def protected_route(
     }
 
 # ==========================================
-# ERROR HANDLERS
+# ERROR HANDLER
 # ==========================================
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
-    """
-    Custom HTTP exception handler for better error responses
-    """
-    return {
-        "error": True,
-        "status_code": exc.status_code,
-        "detail": exc.detail,
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": True,
+            "status_code": exc.status_code,
+            "detail": exc.detail,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
 
 # ==========================================
 # RUN SERVER
@@ -478,10 +467,9 @@ async def http_exception_handler(request, exc):
 if __name__ == "__main__":
     logger.info(f"Starting server on port {PORT}")
     logger.info(f"API Documentation available at http://localhost:{PORT}/docs")
-    
     uvicorn.run(
         "Server:app",
         host="0.0.0.0",
         port=PORT,
-        reload=False  # Set to False for production
+        reload=False
     )
